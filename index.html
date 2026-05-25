@@ -289,7 +289,21 @@ input { font-family: inherit; }
   margin-top: 5px; overflow: hidden;
 }
 .track-progress .fill { height: 100%; background: var(--grad); border-radius: 2px; }
-.track-status { font-size: 16px; flex-shrink: 0; width: 28px; text-align: center; }
+.track-status {
+  font-size: 16px; flex-shrink: 0; width: 36px; height: 36px;
+  border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all .2s var(--ease);
+}
+.track-status.cached { color: var(--success); background: rgba(74,222,128,0.1); }
+.track-status.cached:active { color: #f87171; background: rgba(248,113,113,0.1); }
+.track-status.not-cached { color: var(--text2); background: var(--surface-el); }
+.track-status.not-cached:active { color: var(--accent); }
+.track-status.downloading-single { pointer-events: none; opacity: 0.6; }
+.track-status .dl-spinner {
+  width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
 .track-play-btn {
   width: 36px; height: 36px; flex-shrink: 0;
   border-radius: 50%; background: var(--surface-el);
@@ -1071,26 +1085,30 @@ function renderTrackList(idx, keySet) {
         <div class="track-duration">${pos && pos.duration > 0 ? fmtTime(pos.duration) : ''}</div>
         ${progressHtml}
       </div>
-      <span class="track-status${cached ? ' cached' : ''}" data-key="${key}" title="${cached ? 'Tap to remove download' : ''}">${cached ? '✓' : ''}</span>
+      <span class="track-status ${cached ? 'cached' : 'not-cached'}" data-key="${key}" data-aidx="${idx}" data-tidx="${t}" title="${cached ? 'Tap to remove download' : 'Tap to download'}">${cached ? '✓' : '⬇'}</span>
       <button class="track-play-btn" aria-label="Play ${name}">
         ${isCurrent && playState.playing ? SVG_PAUSE : SVG_PLAY}
       </button>
     `;
 
-    // Delete individual cached track when ✓ is tapped
-    const statusEl = item.querySelector('.track-status.cached');
-    if (statusEl) {
-      statusEl.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const k = statusEl.dataset.key;
+    // Handle track-status click: download or delete
+    const statusEl = item.querySelector('.track-status');
+    statusEl.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const k = statusEl.dataset.key;
+      if (statusEl.classList.contains('cached')) {
+        // Delete this track
         if (k && confirm(`Remove downloaded audio for ${name}?`)) {
           try { await dbDelete(k); } catch {}
           toast(`Removed: ${name}`);
           renderAlbumView(idx);
           renderHome();
         }
-      });
-    }
+      } else if (statusEl.classList.contains('not-cached')) {
+        // Download this single track
+        await downloadSingleTrack(idx, t, statusEl);
+      }
+    });
 
     item.addEventListener('click', (e) => {
       if (e.target.closest('.track-status')) return; // handled above
@@ -1422,6 +1440,42 @@ async function downloadAlbum(aIdx) {
   } else {
     btn.textContent = `⬇ Download (${done}/${count})`;
   }
+  renderHome();
+}
+
+async function downloadSingleTrack(aIdx, tIdx, statusEl) {
+  const a = catalog.albums[aIdx];
+  if (!a) return;
+  const name = getTrackName(a, tIdx);
+  const key = `${aIdx}-${tIdx}`;
+
+  // Show spinner
+  statusEl.classList.remove('not-cached');
+  statusEl.classList.add('downloading-single');
+  statusEl.innerHTML = '<div class="dl-spinner"></div>';
+
+  try {
+    const url = getTrackUrl(a, tIdx);
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    await dbPut({
+      id: key,
+      blob,
+      albumIndex: aIdx,
+      trackIndex: tIdx,
+      albumName: albumName(a),
+      trackName: name,
+      downloadedAt: Date.now(),
+    });
+    toast(`Downloaded: ${name}`);
+  } catch (e) {
+    console.warn(`Download failed for ${name}:`, e);
+    toast(`Failed to download ${name}`);
+  }
+
+  // Re-render to update status
+  renderAlbumView(aIdx);
   renderHome();
 }
 
