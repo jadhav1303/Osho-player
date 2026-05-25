@@ -611,6 +611,30 @@ input { font-family: inherit; }
 (() => {
 'use strict';
 
+/* ---- Anti-copy / Anti-theft protections ----------------------------- */
+// Disable right-click context menu
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+// Block common source-viewing shortcuts
+document.addEventListener('keydown', e => {
+  // Ctrl+U (view source), Ctrl+S (save), Ctrl+Shift+I (devtools), F12
+  if (
+    (e.ctrlKey && e.key === 'u') ||
+    (e.ctrlKey && e.key === 's') ||
+    (e.ctrlKey && e.shiftKey && e.key === 'I') ||
+    (e.ctrlKey && e.shiftKey && e.key === 'J') ||
+    (e.ctrlKey && e.shiftKey && e.key === 'C') ||
+    e.key === 'F12'
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+});
+
+// Console warning
+console.log('%c⚠ STOP', 'color:#f00;font-size:40px;font-weight:bold');
+console.log('%cThis is a private application. Unauthorized copying, modification, or redistribution is prohibited.', 'color:#ff6b6b;font-size:14px');
+
 /* ---- Constants ----------------------------------------------------- */
 const CATALOG_URL = 'https://rajneesh-live.github.io/rajneesh/catalog.json';
 const LS = {
