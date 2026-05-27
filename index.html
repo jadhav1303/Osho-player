@@ -359,6 +359,25 @@ input { font-family: inherit; }
   background: rgba(255,255,255,0.1); font-size: 13px; font-weight: 600;
   min-width: 52px; text-align: center;
 }
+.np-top-right { display: flex; gap: 8px; align-items: center; }
+.np-enhance-btn {
+  padding: 6px 14px; border-radius: 99px;
+  font-size: 12px; font-weight: 600;
+  min-width: 52px; text-align: center;
+  transition: all .25s var(--ease);
+  background: rgba(255,255,255,0.08); color: var(--text2);
+  border: 1px solid transparent;
+}
+.np-enhance-btn.active {
+  background: rgba(74,222,128,0.15); color: var(--success);
+  border-color: rgba(74,222,128,0.3);
+  box-shadow: 0 0 12px rgba(74,222,128,0.1);
+}
+.np-enhance-btn .enhance-icon {
+  display: inline-block; margin-right: 3px;
+  transition: transform .3s var(--ease);
+}
+.np-enhance-btn.active .enhance-icon { transform: scale(1.15); }
 .np-art {
   width: min(75vw, 320px); aspect-ratio: 1;
   border-radius: var(--radius-sm);
@@ -560,7 +579,12 @@ input { font-family: inherit; }
       <button class="np-close" id="np-close" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
-      <button class="np-speed-btn" id="np-speed">1x</button>
+      <div class="np-top-right">
+        <button class="np-enhance-btn" id="np-enhance" title="Voice Enhance: removes wind noise, boosts voice clarity">
+          <span class="enhance-icon">🎙</span> Enhance
+        </button>
+        <button class="np-speed-btn" id="np-speed">1x</button>
+      </div>
     </div>
     <div class="np-art"><img id="np-art-img" src="" alt="Album art"></div>
     <div class="np-track-name" id="np-track-name">—</div>
@@ -689,6 +713,105 @@ let isSeeking = false;
 let positionSaveTimer = null;
 let downloadController = null; // AbortController for album downloads
 
+/* ---- Web Audio API: Voice Enhancement Pipeline --------------------- */
+let audioCtx = null;
+let sourceNode = null;
+let enhanceEnabled = false;
+// Audio nodes
+let highPassFilter = null;   // Removes wind/rumble below 80Hz
+let voiceEQ1 = null;         // Boost low-mid voice (300Hz)
+let voiceEQ2 = null;         // Boost mid voice presence (1.2kHz)
+let voiceEQ3 = null;         // Boost voice clarity (3kHz)
+let compressor = null;       // Volume normalization
+let gainNode = null;         // Extra volume boost
+
+function initAudioEnhancer() {
+  if (audioCtx) return; // Already initialized
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  sourceNode = audioCtx.createMediaElementSource(audio);
+
+  // 1. High-pass filter: cuts everything below 80Hz (wind, rumble)
+  highPassFilter = audioCtx.createBiquadFilter();
+  highPassFilter.type = 'highpass';
+  highPassFilter.frequency.value = 80;
+  highPassFilter.Q.value = 0.7;
+
+  // 2. Voice EQ Band 1: warm body at 300Hz
+  voiceEQ1 = audioCtx.createBiquadFilter();
+  voiceEQ1.type = 'peaking';
+  voiceEQ1.frequency.value = 300;
+  voiceEQ1.Q.value = 1.0;
+  voiceEQ1.gain.value = 3; // +3dB
+
+  // 3. Voice EQ Band 2: presence at 1.2kHz
+  voiceEQ2 = audioCtx.createBiquadFilter();
+  voiceEQ2.type = 'peaking';
+  voiceEQ2.frequency.value = 1200;
+  voiceEQ2.Q.value = 1.0;
+  voiceEQ2.gain.value = 5; // +5dB
+
+  // 4. Voice EQ Band 3: clarity at 3kHz
+  voiceEQ3 = audioCtx.createBiquadFilter();
+  voiceEQ3.type = 'peaking';
+  voiceEQ3.frequency.value = 3000;
+  voiceEQ3.Q.value = 1.0;
+  voiceEQ3.gain.value = 4; // +4dB
+
+  // 5. Compressor: normalizes volume (loud stays same, quiet gets boosted)
+  compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -35;  // Start compressing at -35dB
+  compressor.knee.value = 15;        // Soft knee for natural sound
+  compressor.ratio.value = 6;        // 6:1 compression ratio
+  compressor.attack.value = 0.005;   // Fast attack (5ms)
+  compressor.release.value = 0.15;   // Medium release (150ms)
+
+  // 6. Gain: extra volume boost after compression
+  gainNode = audioCtx.createGain();
+  gainNode.gain.value = 2.2; // +7dB boost
+
+  // Start with direct connection (bypass)
+  sourceNode.connect(audioCtx.destination);
+}
+
+function setEnhanceEnabled(enabled) {
+  if (!audioCtx) initAudioEnhancer();
+  enhanceEnabled = enabled;
+
+  // Disconnect everything first
+  sourceNode.disconnect();
+
+  if (enabled) {
+    // Chain: source → highpass → EQ1 → EQ2 → EQ3 → compressor → gain → output
+    sourceNode.connect(highPassFilter);
+    highPassFilter.connect(voiceEQ1);
+    voiceEQ1.connect(voiceEQ2);
+    voiceEQ2.connect(voiceEQ3);
+    voiceEQ3.connect(compressor);
+    compressor.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+  } else {
+    // Direct: source → output
+    sourceNode.connect(audioCtx.destination);
+  }
+
+  // Save preference
+  const prefs = getPrefs();
+  prefs.enhance = enabled;
+  savePrefs(prefs);
+
+  // Update UI
+  const btn = $('np-enhance');
+  if (btn) btn.classList.toggle('active', enabled);
+}
+
+function toggleEnhance() {
+  if (!audioCtx) initAudioEnhancer();
+  // Resume AudioContext if suspended (iOS Safari requires user gesture)
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  setEnhanceEnabled(!enhanceEnabled);
+  toast(enhanceEnabled ? 'Voice Enhance: ON' : 'Voice Enhance: OFF');
+}
+
 /* ---- Helpers: LocalStorage ----------------------------------------- */
 function lsGet(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
@@ -714,7 +837,7 @@ function saveQueue() {
   lsSet(LS.queue, { albumIndex: playState.albumIndex, trackIndex: playState.trackIndex, position: audio.currentTime || 0 });
 }
 
-function getPrefs() { return lsGet(LS.prefs, { speed: 1, language: 'all' }); }
+function getPrefs() { return lsGet(LS.prefs, { speed: 1, language: 'all', enhance: false }); }
 function savePrefs(p) { lsSet(LS.prefs, p); }
 
 function addHistory(aIdx, tIdx) {
@@ -1553,6 +1676,7 @@ function bindEvents() {
   $('btn-rew').addEventListener('click', () => seekRelative(-15));
   $('btn-fwd').addEventListener('click', () => seekRelative(30));
   $('np-speed').addEventListener('click', cycleSpeed);
+  $('np-enhance').addEventListener('click', toggleEnhance);
   $('np-close').addEventListener('click', () => history.back());
 
   // Seek
@@ -1603,6 +1727,21 @@ async function init() {
     const prefs = getPrefs();
     audio.playbackRate = prefs.speed || 1;
     $('np-speed').textContent = (prefs.speed || 1) + 'x';
+
+    // Restore enhance preference
+    if (prefs.enhance) {
+      // Delay init until first user interaction (iOS requires gesture)
+      const initEnhanceOnce = () => {
+        initAudioEnhancer();
+        setEnhanceEnabled(true);
+        document.removeEventListener('touchstart', initEnhanceOnce);
+        document.removeEventListener('click', initEnhanceOnce);
+      };
+      document.addEventListener('touchstart', initEnhanceOnce, { once: true });
+      document.addEventListener('click', initEnhanceOnce, { once: true });
+      // Show button as active even before init
+      $('np-enhance').classList.add('active');
+    }
 
     // Restore playback state without auto-playing
     const q = getQueue();
