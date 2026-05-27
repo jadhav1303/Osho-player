@@ -806,6 +806,7 @@ let lowPassFilter = null;    // Cut above 5.5kHz (removes hiss/ambient)
 let voiceEQ1 = null;         // Boost voice presence (1-2kHz)
 let voiceEQ2 = null;         // Boost voice clarity (2.5-3.5kHz)
 let notchLow = null;         // Cut low-frequency noise (100-200Hz range)
+let deHarsh = null;          // Tame sibilance/harshness (4-5kHz)
 let compressor = null;       // Volume normalization
 let gainNode = null;         // Volume boost
 
@@ -815,50 +816,57 @@ function initAudioEnhancer() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     sourceNode = audioCtx.createMediaElementSource(audio);
 
-    // 1. Aggressive high-pass: kill wind noise and rumble below 150Hz
+    // 1. High-pass: gentle roll-off below 120Hz (removes rumble/wind naturally)
     highPassFilter = audioCtx.createBiquadFilter();
     highPassFilter.type = 'highpass';
-    highPassFilter.frequency.value = 150;
-    highPassFilter.Q.value = 1.0; // Steeper rolloff
+    highPassFilter.frequency.value = 120;
+    highPassFilter.Q.value = 0.7; // Gentle slope, no resonance
 
-    // 2. Low-pass: kill high-frequency hiss and ambient above 5.5kHz
+    // 2. Low-pass: keep speech clarity up to 7kHz, soften everything above
     lowPassFilter = audioCtx.createBiquadFilter();
     lowPassFilter.type = 'lowpass';
-    lowPassFilter.frequency.value = 5500;
-    lowPassFilter.Q.value = 0.8;
+    lowPassFilter.frequency.value = 7000;
+    lowPassFilter.Q.value = 0.5; // Very gentle, avoids harshness at cutoff
 
-    // 3. Notch to cut low-mid noise (crowd murmur sits around 200Hz)
+    // 3. Cut low-mid noise (fan hum, crowd murmur around 200-250Hz)
     notchLow = audioCtx.createBiquadFilter();
     notchLow.type = 'peaking';
-    notchLow.frequency.value = 200;
-    notchLow.Q.value = 1.5;
-    notchLow.gain.value = -5; // CUT -5dB (reduce noise here)
+    notchLow.frequency.value = 220;
+    notchLow.Q.value = 1.0;
+    notchLow.gain.value = -4; // Gentle -4dB cut
 
-    // 4. Voice presence boost at 1.5kHz (targeted, narrow Q)
+    // 4. Voice warmth/body at 800Hz (adds that "FM radio" richness)
     voiceEQ1 = audioCtx.createBiquadFilter();
     voiceEQ1.type = 'peaking';
-    voiceEQ1.frequency.value = 1500;
-    voiceEQ1.Q.value = 2.0; // Narrow = voice only, not noise
-    voiceEQ1.gain.value = 6; // +6dB targeted boost
+    voiceEQ1.frequency.value = 800;
+    voiceEQ1.Q.value = 1.0;
+    voiceEQ1.gain.value = 2; // Subtle +2dB warmth
 
-    // 5. Voice clarity at 3kHz (makes consonants/words distinct)
+    // 5. Voice presence at 2.5kHz (makes words clear without harshness)
     voiceEQ2 = audioCtx.createBiquadFilter();
     voiceEQ2.type = 'peaking';
-    voiceEQ2.frequency.value = 3000;
-    voiceEQ2.Q.value = 2.0;
-    voiceEQ2.gain.value = 4; // +4dB
+    voiceEQ2.frequency.value = 2500;
+    voiceEQ2.Q.value = 1.5; // Moderately focused
+    voiceEQ2.gain.value = 3; // +3dB — enough to hear, not enough to hurt
 
-    // 6. Compressor: makes quiet speech louder, limits loud parts
+    // 6. De-harshness: gently tame the 4-5kHz sibilance/harsh zone
+    deHarsh = audioCtx.createBiquadFilter();
+    deHarsh.type = 'peaking';
+    deHarsh.frequency.value = 4500;
+    deHarsh.Q.value = 1.0;
+    deHarsh.gain.value = -3; // -3dB — smooths sharp edges
+
+    // 7. Compressor: gentle, like FM radio broadcast (not aggressive)
     compressor = audioCtx.createDynamicsCompressor();
-    compressor.threshold.value = -40;  // Catch quiet speech
-    compressor.knee.value = 10;
-    compressor.ratio.value = 8;        // Strong compression for consistency
-    compressor.attack.value = 0.003;   // Fast attack (3ms)
-    compressor.release.value = 0.25;   // Smooth release
+    compressor.threshold.value = -25;  // Only catches actual speech, ignores quiet noise
+    compressor.knee.value = 30;        // Very soft knee = smooth, natural transitions
+    compressor.ratio.value = 3;        // 3:1 = gentle, preserves dynamics
+    compressor.attack.value = 0.012;   // 12ms = lets natural transients through (soft punch)
+    compressor.release.value = 0.3;    // 300ms = smooth tail, no pumping
 
-    // 7. Makeup gain after compression
+    // 8. Gentle makeup gain
     gainNode = audioCtx.createGain();
-    gainNode.gain.value = 2.5; // ~8dB boost
+    gainNode.gain.value = 1.5; // ~3.5dB — just enough lift, no distortion
 
     // Connect in bypass mode initially (source → destination)
     sourceNode.connect(audioCtx.destination);
@@ -892,17 +900,19 @@ function applyEnhanceChain(enabled) {
   try { notchLow.disconnect(); } catch {}
   try { voiceEQ1.disconnect(); } catch {}
   try { voiceEQ2.disconnect(); } catch {}
+  try { if (deHarsh) deHarsh.disconnect(); } catch {}
   try { compressor.disconnect(); } catch {}
   try { gainNode.disconnect(); } catch {}
 
   if (enabled) {
-    // Chain: source → highpass → lowpass → notch → EQ1 → EQ2 → compressor → gain → output
+    // Chain: source → highpass → lowpass → notch → warmth → presence → de-harsh → compressor → gain → output
     sourceNode.connect(highPassFilter);
     highPassFilter.connect(lowPassFilter);
     lowPassFilter.connect(notchLow);
     notchLow.connect(voiceEQ1);
     voiceEQ1.connect(voiceEQ2);
-    voiceEQ2.connect(compressor);
+    voiceEQ2.connect(deHarsh);
+    deHarsh.connect(compressor);
     compressor.connect(gainNode);
     gainNode.connect(audioCtx.destination);
   } else {
