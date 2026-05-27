@@ -639,7 +639,7 @@ input { font-family: inherit; }
 <div class="toast" id="toast"></div>
 
 <!-- ============ AUDIO ELEMENT ============ -->
-<audio id="audio" preload="metadata"></audio>
+<audio id="audio" preload="metadata" crossorigin="anonymous"></audio>
 
 <script>
 /* ========================================================================
@@ -717,6 +717,7 @@ let downloadController = null; // AbortController for album downloads
 let audioCtx = null;
 let sourceNode = null;
 let enhanceEnabled = false;
+let audioEnhancerReady = false;
 // Audio nodes
 let highPassFilter = null;   // Removes wind/rumble below 80Hz
 let voiceEQ1 = null;         // Boost low-mid voice (300Hz)
@@ -726,59 +727,73 @@ let compressor = null;       // Volume normalization
 let gainNode = null;         // Extra volume boost
 
 function initAudioEnhancer() {
-  if (audioCtx) return; // Already initialized
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  sourceNode = audioCtx.createMediaElementSource(audio);
+  if (audioEnhancerReady) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioCtx.createMediaElementSource(audio);
 
-  // 1. High-pass filter: cuts everything below 80Hz (wind, rumble)
-  highPassFilter = audioCtx.createBiquadFilter();
-  highPassFilter.type = 'highpass';
-  highPassFilter.frequency.value = 80;
-  highPassFilter.Q.value = 0.7;
+    // 1. High-pass filter: cuts everything below 80Hz (wind, rumble)
+    highPassFilter = audioCtx.createBiquadFilter();
+    highPassFilter.type = 'highpass';
+    highPassFilter.frequency.value = 80;
+    highPassFilter.Q.value = 0.7;
 
-  // 2. Voice EQ Band 1: warm body at 300Hz
-  voiceEQ1 = audioCtx.createBiquadFilter();
-  voiceEQ1.type = 'peaking';
-  voiceEQ1.frequency.value = 300;
-  voiceEQ1.Q.value = 1.0;
-  voiceEQ1.gain.value = 3; // +3dB
+    // 2. Voice EQ Band 1: warm body at 300Hz
+    voiceEQ1 = audioCtx.createBiquadFilter();
+    voiceEQ1.type = 'peaking';
+    voiceEQ1.frequency.value = 300;
+    voiceEQ1.Q.value = 1.0;
+    voiceEQ1.gain.value = 3;
 
-  // 3. Voice EQ Band 2: presence at 1.2kHz
-  voiceEQ2 = audioCtx.createBiquadFilter();
-  voiceEQ2.type = 'peaking';
-  voiceEQ2.frequency.value = 1200;
-  voiceEQ2.Q.value = 1.0;
-  voiceEQ2.gain.value = 5; // +5dB
+    // 3. Voice EQ Band 2: presence at 1.2kHz
+    voiceEQ2 = audioCtx.createBiquadFilter();
+    voiceEQ2.type = 'peaking';
+    voiceEQ2.frequency.value = 1200;
+    voiceEQ2.Q.value = 1.0;
+    voiceEQ2.gain.value = 5;
 
-  // 4. Voice EQ Band 3: clarity at 3kHz
-  voiceEQ3 = audioCtx.createBiquadFilter();
-  voiceEQ3.type = 'peaking';
-  voiceEQ3.frequency.value = 3000;
-  voiceEQ3.Q.value = 1.0;
-  voiceEQ3.gain.value = 4; // +4dB
+    // 4. Voice EQ Band 3: clarity at 3kHz
+    voiceEQ3 = audioCtx.createBiquadFilter();
+    voiceEQ3.type = 'peaking';
+    voiceEQ3.frequency.value = 3000;
+    voiceEQ3.Q.value = 1.0;
+    voiceEQ3.gain.value = 4;
 
-  // 5. Compressor: normalizes volume (loud stays same, quiet gets boosted)
-  compressor = audioCtx.createDynamicsCompressor();
-  compressor.threshold.value = -35;  // Start compressing at -35dB
-  compressor.knee.value = 15;        // Soft knee for natural sound
-  compressor.ratio.value = 6;        // 6:1 compression ratio
-  compressor.attack.value = 0.005;   // Fast attack (5ms)
-  compressor.release.value = 0.15;   // Medium release (150ms)
+    // 5. Compressor: normalizes volume
+    compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -35;
+    compressor.knee.value = 15;
+    compressor.ratio.value = 6;
+    compressor.attack.value = 0.005;
+    compressor.release.value = 0.15;
 
-  // 6. Gain: extra volume boost after compression
-  gainNode = audioCtx.createGain();
-  gainNode.gain.value = 2.2; // +7dB boost
+    // 6. Gain: extra volume boost
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 2.2;
 
-  // Start with direct connection (bypass)
-  sourceNode.connect(audioCtx.destination);
+    // Connect in bypass mode initially (source → destination)
+    sourceNode.connect(audioCtx.destination);
+    audioEnhancerReady = true;
+
+    // If enhance was already toggled on, apply it now
+    if (enhanceEnabled) applyEnhanceChain(true);
+  } catch (e) {
+    console.warn('Web Audio API init failed:', e);
+  }
 }
 
-function setEnhanceEnabled(enabled) {
-  if (!audioCtx) initAudioEnhancer();
-  enhanceEnabled = enabled;
+function applyEnhanceChain(enabled) {
+  if (!audioEnhancerReady) return;
 
-  // Disconnect everything first
-  sourceNode.disconnect();
+  // Disconnect source from everything
+  try { sourceNode.disconnect(); } catch {}
+  // Also disconnect intermediate nodes to avoid duplicate connections
+  try { highPassFilter.disconnect(); } catch {}
+  try { voiceEQ1.disconnect(); } catch {}
+  try { voiceEQ2.disconnect(); } catch {}
+  try { voiceEQ3.disconnect(); } catch {}
+  try { compressor.disconnect(); } catch {}
+  try { gainNode.disconnect(); } catch {}
 
   if (enabled) {
     // Chain: source → highpass → EQ1 → EQ2 → EQ3 → compressor → gain → output
@@ -790,9 +805,14 @@ function setEnhanceEnabled(enabled) {
     compressor.connect(gainNode);
     gainNode.connect(audioCtx.destination);
   } else {
-    // Direct: source → output
+    // Bypass: source → output
     sourceNode.connect(audioCtx.destination);
   }
+}
+
+function setEnhanceEnabled(enabled) {
+  enhanceEnabled = enabled;
+  applyEnhanceChain(enabled);
 
   // Save preference
   const prefs = getPrefs();
@@ -805,9 +825,10 @@ function setEnhanceEnabled(enabled) {
 }
 
 function toggleEnhance() {
-  if (!audioCtx) initAudioEnhancer();
+  // Init if not ready yet
+  if (!audioEnhancerReady) initAudioEnhancer();
   // Resume AudioContext if suspended (iOS Safari requires user gesture)
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   setEnhanceEnabled(!enhanceEnabled);
   toast(enhanceEnabled ? 'Voice Enhance: ON' : 'Voice Enhance: OFF');
 }
@@ -1272,6 +1293,11 @@ async function playTrack(aIdx, tIdx) {
   audio.src = src;
   audio.playbackRate = getPrefs().speed || 1;
 
+  // Initialize Web Audio enhancer on first play (must happen before audio.play)
+  if (!audioEnhancerReady) initAudioEnhancer();
+  // Resume AudioContext if suspended (iOS requires user gesture)
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
   // Resume position
   const saved = getPosition(aIdx, tIdx);
   if (saved && saved.position > 5 && saved.duration > 0 && saved.position < saved.duration - 2) {
@@ -1730,16 +1756,7 @@ async function init() {
 
     // Restore enhance preference
     if (prefs.enhance) {
-      // Delay init until first user interaction (iOS requires gesture)
-      const initEnhanceOnce = () => {
-        initAudioEnhancer();
-        setEnhanceEnabled(true);
-        document.removeEventListener('touchstart', initEnhanceOnce);
-        document.removeEventListener('click', initEnhanceOnce);
-      };
-      document.addEventListener('touchstart', initEnhanceOnce, { once: true });
-      document.addEventListener('click', initEnhanceOnce, { once: true });
-      // Show button as active even before init
+      enhanceEnabled = true; // Flag it; actual chain applied when initAudioEnhancer runs
       $('np-enhance').classList.add('active');
     }
 
