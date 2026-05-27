@@ -720,7 +720,7 @@ input { font-family: inherit; }
 <div class="toast" id="toast"></div>
 
 <!-- ============ AUDIO ELEMENT ============ -->
-<audio id="audio" preload="metadata" crossorigin="anonymous"></audio>
+<audio id="audio" preload="metadata"></audio>
 
 <script>
 /* ========================================================================
@@ -813,7 +813,24 @@ function initAudioEnhancer() {
   if (audioEnhancerReady) return;
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Add crossorigin BEFORE creating MediaElementSource (required for CORS audio)
+    audio.crossOrigin = 'anonymous';
+    // If audio is already playing, we need to reload with the new crossorigin attribute
+    const wasSrc = audio.src;
+    const wasTime = audio.currentTime;
+    const wasPlaying = !audio.paused;
+    if (wasSrc) {
+      audio.src = wasSrc; // reload with crossorigin
+      audio.currentTime = wasTime;
+    }
+
     sourceNode = audioCtx.createMediaElementSource(audio);
+
+    // Resume playback if it was playing before
+    if (wasPlaying && wasSrc) {
+      audio.play().catch(() => {});
+    }
 
     // 1. High-pass: gentle roll-off below 120Hz (removes rumble/wind naturally)
     highPassFilter = audioCtx.createBiquadFilter();
@@ -873,17 +890,6 @@ function initAudioEnhancer() {
 
     // If enhance was already flagged on, apply it now
     if (enhanceEnabled) applyEnhanceChain(true);
-
-    // Resume audio on visibility change (prevents screen-off stopping playback)
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && audioCtx) {
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-        // If audio was playing but got paused by OS suspend, resume it
-        if (playState.playing && audio.paused) {
-          audio.play().catch(() => {});
-        }
-      }
-    });
   } catch (e) {
     console.warn('Web Audio API init failed:', e);
   }
@@ -1499,6 +1505,82 @@ audio.addEventListener('ended', () => {
   }
   nextTrack();
 });
+
+/* ---- Stall Detector: recovers from iOS 'DJ loop' bug --------------- */
+let lastTimeCheck = 0;
+let stallCount = 0;
+
+function startStallDetector() {
+  setInterval(() => {
+    if (!playState.playing || audio.paused) {
+      lastTimeCheck = 0;
+      stallCount = 0;
+      return;
+    }
+    const now = audio.currentTime;
+    // If time hasn't moved in 2 seconds but audio thinks it's playing
+    if (lastTimeCheck > 0 && Math.abs(now - lastTimeCheck) < 0.05 && !audio.paused) {
+      stallCount++;
+      if (stallCount >= 2) { // Stalled for 4+ seconds
+        console.warn('Audio stall detected, recovering...');
+        recoverAudio();
+        stallCount = 0;
+      }
+    } else {
+      stallCount = 0;
+    }
+    lastTimeCheck = now;
+  }, 2000);
+}
+
+function recoverAudio() {
+  const pos = audio.currentTime;
+  const src = audio.src;
+  if (!src) return;
+
+  // Reload the audio source and seek back to position
+  audio.src = src;
+  audio.currentTime = pos;
+  audio.playbackRate = getPrefs().speed || 1;
+
+  // Resume AudioContext if needed
+  if (audioEnhancerReady && audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+
+  audio.play().catch(() => {});
+  toast('Audio recovered');
+}
+
+/* ---- Visibility change: resume on screen wake ---------------------- */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    // Resume AudioContext if enhance is active
+    if (audioEnhancerReady && audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    // If audio should be playing but got paused by OS
+    if (playState.playing && audio.paused) {
+      audio.play().catch(() => {});
+    }
+    // Check if audio is stuck (the 'DJ loop')
+    setTimeout(() => {
+      if (playState.playing && !audio.paused) {
+        const t1 = audio.currentTime;
+        setTimeout(() => {
+          const t2 = audio.currentTime;
+          if (Math.abs(t2 - t1) < 0.05) {
+            // Still stuck after 500ms — recover
+            recoverAudio();
+          }
+        }, 500);
+      }
+    }, 300);
+  }
+});
+
+startStallDetector();
+
 audio.addEventListener('timeupdate', () => {
   if (isSeeking) return;
   updateProgress();
