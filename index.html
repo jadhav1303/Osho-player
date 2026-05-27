@@ -719,8 +719,11 @@ input { font-family: inherit; }
 <!-- ============ TOAST ============ -->
 <div class="toast" id="toast"></div>
 
-<!-- ============ AUDIO ELEMENT ============ -->
+<!-- ============ AUDIO ELEMENTS ============ -->
+<!-- Main: never connected to Web Audio, handles background playback -->
 <audio id="audio" preload="metadata"></audio>
+<!-- Enhanced: connected to Web Audio filters, only active when enhance is ON -->
+<audio id="audio-fx" preload="metadata" crossorigin="anonymous" style="display:none"></audio>
 
 <script>
 /* ========================================================================
@@ -769,6 +772,7 @@ const SPEEDS = [1, 1.25, 1.5, 2, 0.75];
 /* ---- DOM refs ------------------------------------------------------ */
 const $ = id => document.getElementById(id);
 const audio = $('audio');
+const audioFx = $('audio-fx');
 const loadingScreen = $('loading-screen');
 const errorScreen = $('error-screen');
 const errorMsg = $('error-msg');
@@ -795,158 +799,153 @@ let positionSaveTimer = null;
 let downloadController = null; // AbortController for album downloads
 
 /* ---- Web Audio API: Voice Enhancement Pipeline --------------------- */
+/*
+ * Architecture: TWO audio elements for seamless background playback.
+ * - `audio` (native): never connected to Web Audio, plays in background always
+ * - `audioFx`: connected to Web Audio filters, provides enhanced output
+ *
+ * When enhance is ON + screen on: audio is muted, audioFx plays through filters
+ * When enhance is ON + screen off: audio unmutes (native background), audioFx suspends
+ * When enhance is OFF: audio plays normally, audioFx is paused
+ */
 let audioCtx = null;
 let sourceNode = null;
 let enhanceEnabled = false;
 let audioEnhancerReady = false;
-// Audio nodes
-let highPassFilter = null;   // Aggressive cut below 150Hz
-let lowPassFilter = null;    // Cut above 5.5kHz (removes hiss/ambient)
-let voiceEQ1 = null;         // Boost voice presence (1-2kHz)
-let voiceEQ2 = null;         // Boost voice clarity (2.5-3.5kHz)
-let notchLow = null;         // Cut low-frequency noise (100-200Hz range)
-let deHarsh = null;          // Tame sibilance/harshness (4-5kHz)
-let compressor = null;       // Volume normalization
-let gainNode = null;         // Volume boost
+let enhanceFallbackActive = false; // true when native audio is covering for suspended audioFx
 
 function initAudioEnhancer() {
   if (audioEnhancerReady) return;
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioCtx.createMediaElementSource(audioFx);
 
-    // Add crossorigin BEFORE creating MediaElementSource (required for CORS audio)
-    audio.crossOrigin = 'anonymous';
-    // If audio is already playing, we need to reload with the new crossorigin attribute
-    const wasSrc = audio.src;
-    const wasTime = audio.currentTime;
-    const wasPlaying = !audio.paused;
-    if (wasSrc) {
-      audio.src = wasSrc; // reload with crossorigin
-      audio.currentTime = wasTime;
-    }
+    // 1. High-pass: gentle roll-off below 120Hz
+    const highPass = audioCtx.createBiquadFilter();
+    highPass.type = 'highpass'; highPass.frequency.value = 120; highPass.Q.value = 0.7;
 
-    sourceNode = audioCtx.createMediaElementSource(audio);
+    // 2. Low-pass: soften above 7kHz
+    const lowPass = audioCtx.createBiquadFilter();
+    lowPass.type = 'lowpass'; lowPass.frequency.value = 7000; lowPass.Q.value = 0.5;
 
-    // Resume playback if it was playing before
-    if (wasPlaying && wasSrc) {
-      audio.play().catch(() => {});
-    }
+    // 3. Cut crowd murmur around 220Hz
+    const notch = audioCtx.createBiquadFilter();
+    notch.type = 'peaking'; notch.frequency.value = 220; notch.Q.value = 1.0; notch.gain.value = -4;
 
-    // 1. High-pass: gentle roll-off below 120Hz (removes rumble/wind naturally)
-    highPassFilter = audioCtx.createBiquadFilter();
-    highPassFilter.type = 'highpass';
-    highPassFilter.frequency.value = 120;
-    highPassFilter.Q.value = 0.7; // Gentle slope, no resonance
+    // 4. Voice warmth at 800Hz
+    const eq1 = audioCtx.createBiquadFilter();
+    eq1.type = 'peaking'; eq1.frequency.value = 800; eq1.Q.value = 1.0; eq1.gain.value = 2;
 
-    // 2. Low-pass: keep speech clarity up to 7kHz, soften everything above
-    lowPassFilter = audioCtx.createBiquadFilter();
-    lowPassFilter.type = 'lowpass';
-    lowPassFilter.frequency.value = 7000;
-    lowPassFilter.Q.value = 0.5; // Very gentle, avoids harshness at cutoff
+    // 5. Voice presence at 2.5kHz
+    const eq2 = audioCtx.createBiquadFilter();
+    eq2.type = 'peaking'; eq2.frequency.value = 2500; eq2.Q.value = 1.5; eq2.gain.value = 3;
 
-    // 3. Cut low-mid noise (fan hum, crowd murmur around 200-250Hz)
-    notchLow = audioCtx.createBiquadFilter();
-    notchLow.type = 'peaking';
-    notchLow.frequency.value = 220;
-    notchLow.Q.value = 1.0;
-    notchLow.gain.value = -4; // Gentle -4dB cut
+    // 6. De-harshness at 4.5kHz
+    const deHarsh = audioCtx.createBiquadFilter();
+    deHarsh.type = 'peaking'; deHarsh.frequency.value = 4500; deHarsh.Q.value = 1.0; deHarsh.gain.value = -3;
 
-    // 4. Voice warmth/body at 800Hz (adds that "FM radio" richness)
-    voiceEQ1 = audioCtx.createBiquadFilter();
-    voiceEQ1.type = 'peaking';
-    voiceEQ1.frequency.value = 800;
-    voiceEQ1.Q.value = 1.0;
-    voiceEQ1.gain.value = 2; // Subtle +2dB warmth
+    // 7. Compressor
+    const comp = audioCtx.createDynamicsCompressor();
+    comp.threshold.value = -25; comp.knee.value = 30; comp.ratio.value = 3;
+    comp.attack.value = 0.012; comp.release.value = 0.3;
 
-    // 5. Voice presence at 2.5kHz (makes words clear without harshness)
-    voiceEQ2 = audioCtx.createBiquadFilter();
-    voiceEQ2.type = 'peaking';
-    voiceEQ2.frequency.value = 2500;
-    voiceEQ2.Q.value = 1.5; // Moderately focused
-    voiceEQ2.gain.value = 3; // +3dB — enough to hear, not enough to hurt
+    // 8. Gain
+    const gain = audioCtx.createGain();
+    gain.gain.value = 1.5;
 
-    // 6. De-harshness: gently tame the 4-5kHz sibilance/harsh zone
-    deHarsh = audioCtx.createBiquadFilter();
-    deHarsh.type = 'peaking';
-    deHarsh.frequency.value = 4500;
-    deHarsh.Q.value = 1.0;
-    deHarsh.gain.value = -3; // -3dB — smooths sharp edges
+    // Permanent chain: source → filters → destination (always connected)
+    sourceNode.connect(highPass);
+    highPass.connect(lowPass);
+    lowPass.connect(notch);
+    notch.connect(eq1);
+    eq1.connect(eq2);
+    eq2.connect(deHarsh);
+    deHarsh.connect(comp);
+    comp.connect(gain);
+    gain.connect(audioCtx.destination);
 
-    // 7. Compressor: gentle, like FM radio broadcast (not aggressive)
-    compressor = audioCtx.createDynamicsCompressor();
-    compressor.threshold.value = -25;  // Only catches actual speech, ignores quiet noise
-    compressor.knee.value = 30;        // Very soft knee = smooth, natural transitions
-    compressor.ratio.value = 3;        // 3:1 = gentle, preserves dynamics
-    compressor.attack.value = 0.012;   // 12ms = lets natural transients through (soft punch)
-    compressor.release.value = 0.3;    // 300ms = smooth tail, no pumping
-
-    // 8. Gentle makeup gain
-    gainNode = audioCtx.createGain();
-    gainNode.gain.value = 1.5; // ~3.5dB — just enough lift, no distortion
-
-    // Connect in bypass mode initially (source → destination)
-    sourceNode.connect(audioCtx.destination);
     audioEnhancerReady = true;
-
-    // If enhance was already flagged on, apply it now
-    if (enhanceEnabled) applyEnhanceChain(true);
   } catch (e) {
     console.warn('Web Audio API init failed:', e);
   }
 }
 
-function applyEnhanceChain(enabled) {
-  if (!audioEnhancerReady) return;
+function syncFxToAudio() {
+  // Sync audioFx source and position from audio
+  if (!audio.src) return;
+  const needsNewSrc = audioFx.getAttribute('data-src') !== audio.src;
+  if (needsNewSrc) {
+    audioFx.src = audio.src;
+    audioFx.setAttribute('data-src', audio.src);
+  }
+  audioFx.currentTime = audio.currentTime;
+  audioFx.playbackRate = audio.playbackRate;
+}
 
-  // Disconnect all nodes cleanly
-  try { sourceNode.disconnect(); } catch {}
-  try { highPassFilter.disconnect(); } catch {}
-  try { lowPassFilter.disconnect(); } catch {}
-  try { notchLow.disconnect(); } catch {}
-  try { voiceEQ1.disconnect(); } catch {}
-  try { voiceEQ2.disconnect(); } catch {}
-  try { if (deHarsh) deHarsh.disconnect(); } catch {}
-  try { compressor.disconnect(); } catch {}
-  try { gainNode.disconnect(); } catch {}
+function activateEnhance() {
+  enhanceEnabled = true;
+  enhanceFallbackActive = false;
+  if (!audioEnhancerReady) initAudioEnhancer();
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 
-  if (enabled) {
-    // Chain: source → highpass → lowpass → notch → warmth → presence → de-harsh → compressor → gain → output
-    sourceNode.connect(highPassFilter);
-    highPassFilter.connect(lowPassFilter);
-    lowPassFilter.connect(notchLow);
-    notchLow.connect(voiceEQ1);
-    voiceEQ1.connect(voiceEQ2);
-    voiceEQ2.connect(deHarsh);
-    deHarsh.connect(compressor);
-    compressor.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
-  } else {
-    // Bypass: source → output
-    sourceNode.connect(audioCtx.destination);
+  // Sync and start enhanced audio
+  syncFxToAudio();
+  audio.muted = true;      // Mute native (still plays for background/MediaSession)
+  if (playState.playing) {
+    audioFx.play().catch(() => {});
+  }
+
+  const prefs = getPrefs(); prefs.enhance = true; savePrefs(prefs);
+  $('np-enhance').classList.add('active');
+}
+
+function deactivateEnhance() {
+  enhanceEnabled = false;
+  enhanceFallbackActive = false;
+
+  // Sync position back from audioFx to audio
+  if (audioFx.currentTime > 0 && !audioFx.paused) {
+    audio.currentTime = audioFx.currentTime;
+  }
+  audio.muted = false;     // Unmute native
+  audioFx.pause();         // Stop enhanced
+
+  const prefs = getPrefs(); prefs.enhance = false; savePrefs(prefs);
+  $('np-enhance').classList.remove('active');
+}
+
+function enhanceFallbackToNative() {
+  // Called when screen goes off: let native audio take over
+  if (!enhanceEnabled || enhanceFallbackActive) return;
+  enhanceFallbackActive = true;
+  // Sync position from audioFx (which was audible) to audio (which will become audible)
+  if (audioFx.currentTime > 0) {
+    audio.currentTime = audioFx.currentTime;
+  }
+  audio.muted = false; // Unmute native — background audio continues!
+}
+
+function enhanceResumeFromFallback() {
+  // Called when screen comes back: switch back to enhanced
+  if (!enhanceEnabled || !enhanceFallbackActive) return;
+  enhanceFallbackActive = false;
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  // Sync from audio (which was playing in background) to audioFx
+  syncFxToAudio();
+  audio.muted = true;
+  if (playState.playing) {
+    audioFx.play().catch(() => {});
   }
 }
 
-function setEnhanceEnabled(enabled) {
-  enhanceEnabled = enabled;
-  applyEnhanceChain(enabled);
-
-  // Save preference
-  const prefs = getPrefs();
-  prefs.enhance = enabled;
-  savePrefs(prefs);
-
-  // Update UI
-  const btn = $('np-enhance');
-  if (btn) btn.classList.toggle('active', enabled);
-}
-
 function toggleEnhance() {
-  // Init on first use only (not on first play — keeps background audio working)
-  if (!audioEnhancerReady) initAudioEnhancer();
-  // Resume AudioContext if suspended
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-  setEnhanceEnabled(!enhanceEnabled);
-  toast(enhanceEnabled ? 'Voice Enhance: ON — noise reduced, voice boosted' : 'Voice Enhance: OFF');
+  if (enhanceEnabled) {
+    deactivateEnhance();
+    toast('Voice Enhance: OFF');
+  } else {
+    activateEnhance();
+    toast('Voice Enhance: ON — noise reduced, voice boosted');
+  }
 }
 
 /* ---- Helpers: LocalStorage ----------------------------------------- */
@@ -1409,9 +1408,12 @@ async function playTrack(aIdx, tIdx) {
   audio.src = src;
   audio.playbackRate = getPrefs().speed || 1;
 
-  // Only resume AudioContext if enhancer was previously initialized
-  if (audioEnhancerReady && audioCtx && audioCtx.state === 'suspended') {
-    audioCtx.resume();
+  // If enhance is active, also update audioFx
+  if (enhanceEnabled && audioEnhancerReady) {
+    audioFx.src = src;
+    audioFx.setAttribute('data-src', src);
+    audioFx.playbackRate = getPrefs().speed || 1;
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   }
 
   // Resume position
@@ -1422,6 +1424,12 @@ async function playTrack(aIdx, tIdx) {
 
   try {
     await audio.play();
+    // If enhance is active, sync and play audioFx too
+    if (enhanceEnabled && audioEnhancerReady && !enhanceFallbackActive) {
+      audioFx.currentTime = audio.currentTime;
+      audio.muted = true;
+      audioFx.play().catch(() => {});
+    }
   } catch (e) {
     console.warn('Playback start failed:', e);
     toast('Tap play to start');
@@ -1438,9 +1446,14 @@ function togglePlayPause() {
   if (playState.albumIndex < 0) return;
   if (audio.paused) {
     audio.play().catch(() => {});
+    if (enhanceEnabled && audioEnhancerReady && !enhanceFallbackActive) {
+      syncFxToAudio();
+      audioFx.play().catch(() => {});
+    }
     playState.playing = true;
   } else {
     audio.pause();
+    if (enhanceEnabled && audioEnhancerReady) audioFx.pause();
     playState.playing = false;
   }
   updateAllUI();
@@ -1552,25 +1565,27 @@ function recoverAudio() {
   toast('Audio recovered');
 }
 
-/* ---- Visibility change: resume on screen wake ---------------------- */
+/* ---- Visibility change: handle enhance fallback -------------------- */
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    // Resume AudioContext if enhance is active
-    if (audioEnhancerReady && audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
+  if (document.visibilityState === 'hidden') {
+    // Screen going off: let native audio take over for background playback
+    enhanceFallbackToNative();
+  } else if (document.visibilityState === 'visible') {
+    // Screen came back on
+    enhanceResumeFromFallback();
+
     // If audio should be playing but got paused by OS
     if (playState.playing && audio.paused) {
       audio.play().catch(() => {});
     }
     // Check if audio is stuck (the 'DJ loop')
     setTimeout(() => {
-      if (playState.playing && !audio.paused) {
-        const t1 = audio.currentTime;
+      const activeEl = (enhanceEnabled && !enhanceFallbackActive) ? audioFx : audio;
+      if (playState.playing && !activeEl.paused) {
+        const t1 = activeEl.currentTime;
         setTimeout(() => {
-          const t2 = audio.currentTime;
+          const t2 = activeEl.currentTime;
           if (Math.abs(t2 - t1) < 0.05) {
-            // Still stuck after 500ms — recover
             recoverAudio();
           }
         }, 500);
