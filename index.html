@@ -378,6 +378,41 @@ input { font-family: inherit; }
   transition: transform .3s var(--ease);
 }
 .np-enhance-btn.active .enhance-icon { transform: scale(1.15); }
+
+/* --- Captions modal ------------------------------------------------- */
+.captions-modal {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+  display: flex; align-items: flex-end; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity .3s var(--ease);
+}
+.captions-modal.open { opacity: 1; pointer-events: auto; }
+.captions-sheet {
+  background: var(--surface); border-radius: 20px 20px 0 0;
+  width: 100%; max-width: 480px; max-height: 80vh; overflow-y: auto;
+  padding: 24px 20px calc(var(--safe-b) + 20px);
+  transform: translateY(100%); transition: transform .35s var(--ease);
+}
+.captions-modal.open .captions-sheet { transform: translateY(0); }
+.captions-sheet h3 { font-size: 18px; margin-bottom: 16px; text-align: center; }
+.captions-sheet .close-sheet {
+  position: absolute; top: 16px; right: 16px;
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--surface-el); display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.caption-option {
+  padding: 16px; margin-bottom: 12px;
+  background: var(--surface-el); border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.caption-option .os-name {
+  font-size: 14px; font-weight: 600; color: var(--accent); margin-bottom: 8px;
+}
+.caption-option .os-steps {
+  font-size: 13px; color: var(--text2); line-height: 1.6;
+}
+.caption-option .os-steps strong { color: var(--text); }
 .np-art {
   width: min(75vw, 320px); aspect-ratio: 1;
   border-radius: var(--radius-sm);
@@ -580,8 +615,11 @@ input { font-family: inherit; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="np-top-right">
-        <button class="np-enhance-btn" id="np-enhance" title="Voice Enhance: removes wind noise, boosts voice clarity">
+        <button class="np-enhance-btn" id="np-enhance" title="Voice Enhance: reduces background noise, boosts voice clarity">
           <span class="enhance-icon">🎙</span> Enhance
+        </button>
+        <button class="np-enhance-btn" id="np-captions" title="Show captions instructions">
+          📝 Captions
         </button>
         <button class="np-speed-btn" id="np-speed">1x</button>
       </div>
@@ -616,6 +654,50 @@ input { font-family: inherit; }
       <button class="np-ctrl" id="btn-next" aria-label="Next">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ CAPTIONS MODAL ============ -->
+<div class="captions-modal" id="captions-modal">
+  <div class="captions-sheet">
+    <button class="close-sheet" id="captions-close">✕</button>
+    <h3>📝 Live Captions</h3>
+    <p style="font-size:13px;color:var(--text2);text-align:center;margin-bottom:16px;">Enable your device's built-in Live Captions to read what Osho is saying in real-time.</p>
+    <div class="caption-option">
+      <div class="os-name">🍏 iPhone / iPad (iOS 16+)</div>
+      <div class="os-steps">
+        <strong>Settings</strong> → <strong>Accessibility</strong> → <strong>Live Captions</strong> → Toggle <strong>ON</strong><br>
+        Captions will appear at the top of your screen while audio plays.
+      </div>
+    </div>
+    <div class="caption-option">
+      <div class="os-name">🤖 Android</div>
+      <div class="os-steps">
+        <strong>Settings</strong> → <strong>Accessibility</strong> → <strong>Live Caption</strong> → Toggle <strong>ON</strong><br>
+        Or: press a Volume button, then tap the Live Caption icon below the volume slider.
+      </div>
+    </div>
+    <div class="caption-option">
+      <div class="os-name">💻 Chrome Desktop</div>
+      <div class="os-steps">
+        <strong>Chrome Settings</strong> → <strong>Accessibility</strong> → <strong>Live Caption</strong> → Toggle <strong>ON</strong><br>
+        Or type <strong>chrome://settings/accessibility</strong> in the address bar.
+      </div>
+    </div>
+    <div class="caption-option">
+      <div class="os-name">🪟 Mac</div>
+      <div class="os-steps">
+        <strong>System Settings</strong> → <strong>Accessibility</strong> → <strong>Live Captions</strong> → Toggle <strong>ON</strong><br>
+        Available on macOS Ventura (13) and later.
+      </div>
+    </div>
+    <div class="caption-option">
+      <div class="os-name">🖥️ Windows 11</div>
+      <div class="os-steps">
+        <strong>Settings</strong> → <strong>Accessibility</strong> → <strong>Captions</strong> → <strong>Live Captions</strong> → Toggle <strong>ON</strong><br>
+        Or press <strong>Win + Ctrl + L</strong> to toggle instantly.
+      </div>
     </div>
   </div>
 </div>
@@ -719,12 +801,13 @@ let sourceNode = null;
 let enhanceEnabled = false;
 let audioEnhancerReady = false;
 // Audio nodes
-let highPassFilter = null;   // Removes wind/rumble below 80Hz
-let voiceEQ1 = null;         // Boost low-mid voice (300Hz)
-let voiceEQ2 = null;         // Boost mid voice presence (1.2kHz)
-let voiceEQ3 = null;         // Boost voice clarity (3kHz)
+let highPassFilter = null;   // Aggressive cut below 150Hz
+let lowPassFilter = null;    // Cut above 5.5kHz (removes hiss/ambient)
+let voiceEQ1 = null;         // Boost voice presence (1-2kHz)
+let voiceEQ2 = null;         // Boost voice clarity (2.5-3.5kHz)
+let notchLow = null;         // Cut low-frequency noise (100-200Hz range)
 let compressor = null;       // Volume normalization
-let gainNode = null;         // Extra volume boost
+let gainNode = null;         // Volume boost
 
 function initAudioEnhancer() {
   if (audioEnhancerReady) return;
@@ -732,51 +815,68 @@ function initAudioEnhancer() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     sourceNode = audioCtx.createMediaElementSource(audio);
 
-    // 1. High-pass filter: cuts everything below 80Hz (wind, rumble)
+    // 1. Aggressive high-pass: kill wind noise and rumble below 150Hz
     highPassFilter = audioCtx.createBiquadFilter();
     highPassFilter.type = 'highpass';
-    highPassFilter.frequency.value = 80;
-    highPassFilter.Q.value = 0.7;
+    highPassFilter.frequency.value = 150;
+    highPassFilter.Q.value = 1.0; // Steeper rolloff
 
-    // 2. Voice EQ Band 1: warm body at 300Hz
+    // 2. Low-pass: kill high-frequency hiss and ambient above 5.5kHz
+    lowPassFilter = audioCtx.createBiquadFilter();
+    lowPassFilter.type = 'lowpass';
+    lowPassFilter.frequency.value = 5500;
+    lowPassFilter.Q.value = 0.8;
+
+    // 3. Notch to cut low-mid noise (crowd murmur sits around 200Hz)
+    notchLow = audioCtx.createBiquadFilter();
+    notchLow.type = 'peaking';
+    notchLow.frequency.value = 200;
+    notchLow.Q.value = 1.5;
+    notchLow.gain.value = -5; // CUT -5dB (reduce noise here)
+
+    // 4. Voice presence boost at 1.5kHz (targeted, narrow Q)
     voiceEQ1 = audioCtx.createBiquadFilter();
     voiceEQ1.type = 'peaking';
-    voiceEQ1.frequency.value = 300;
-    voiceEQ1.Q.value = 1.0;
-    voiceEQ1.gain.value = 3;
+    voiceEQ1.frequency.value = 1500;
+    voiceEQ1.Q.value = 2.0; // Narrow = voice only, not noise
+    voiceEQ1.gain.value = 6; // +6dB targeted boost
 
-    // 3. Voice EQ Band 2: presence at 1.2kHz
+    // 5. Voice clarity at 3kHz (makes consonants/words distinct)
     voiceEQ2 = audioCtx.createBiquadFilter();
     voiceEQ2.type = 'peaking';
-    voiceEQ2.frequency.value = 1200;
-    voiceEQ2.Q.value = 1.0;
-    voiceEQ2.gain.value = 5;
+    voiceEQ2.frequency.value = 3000;
+    voiceEQ2.Q.value = 2.0;
+    voiceEQ2.gain.value = 4; // +4dB
 
-    // 4. Voice EQ Band 3: clarity at 3kHz
-    voiceEQ3 = audioCtx.createBiquadFilter();
-    voiceEQ3.type = 'peaking';
-    voiceEQ3.frequency.value = 3000;
-    voiceEQ3.Q.value = 1.0;
-    voiceEQ3.gain.value = 4;
-
-    // 5. Compressor: normalizes volume
+    // 6. Compressor: makes quiet speech louder, limits loud parts
     compressor = audioCtx.createDynamicsCompressor();
-    compressor.threshold.value = -35;
-    compressor.knee.value = 15;
-    compressor.ratio.value = 6;
-    compressor.attack.value = 0.005;
-    compressor.release.value = 0.15;
+    compressor.threshold.value = -40;  // Catch quiet speech
+    compressor.knee.value = 10;
+    compressor.ratio.value = 8;        // Strong compression for consistency
+    compressor.attack.value = 0.003;   // Fast attack (3ms)
+    compressor.release.value = 0.25;   // Smooth release
 
-    // 6. Gain: extra volume boost
+    // 7. Makeup gain after compression
     gainNode = audioCtx.createGain();
-    gainNode.gain.value = 2.2;
+    gainNode.gain.value = 2.5; // ~8dB boost
 
     // Connect in bypass mode initially (source → destination)
     sourceNode.connect(audioCtx.destination);
     audioEnhancerReady = true;
 
-    // If enhance was already toggled on, apply it now
+    // If enhance was already flagged on, apply it now
     if (enhanceEnabled) applyEnhanceChain(true);
+
+    // Resume audio on visibility change (prevents screen-off stopping playback)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && audioCtx) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        // If audio was playing but got paused by OS suspend, resume it
+        if (playState.playing && audio.paused) {
+          audio.play().catch(() => {});
+        }
+      }
+    });
   } catch (e) {
     console.warn('Web Audio API init failed:', e);
   }
@@ -785,23 +885,24 @@ function initAudioEnhancer() {
 function applyEnhanceChain(enabled) {
   if (!audioEnhancerReady) return;
 
-  // Disconnect source from everything
+  // Disconnect all nodes cleanly
   try { sourceNode.disconnect(); } catch {}
-  // Also disconnect intermediate nodes to avoid duplicate connections
   try { highPassFilter.disconnect(); } catch {}
+  try { lowPassFilter.disconnect(); } catch {}
+  try { notchLow.disconnect(); } catch {}
   try { voiceEQ1.disconnect(); } catch {}
   try { voiceEQ2.disconnect(); } catch {}
-  try { voiceEQ3.disconnect(); } catch {}
   try { compressor.disconnect(); } catch {}
   try { gainNode.disconnect(); } catch {}
 
   if (enabled) {
-    // Chain: source → highpass → EQ1 → EQ2 → EQ3 → compressor → gain → output
+    // Chain: source → highpass → lowpass → notch → EQ1 → EQ2 → compressor → gain → output
     sourceNode.connect(highPassFilter);
-    highPassFilter.connect(voiceEQ1);
+    highPassFilter.connect(lowPassFilter);
+    lowPassFilter.connect(notchLow);
+    notchLow.connect(voiceEQ1);
     voiceEQ1.connect(voiceEQ2);
-    voiceEQ2.connect(voiceEQ3);
-    voiceEQ3.connect(compressor);
+    voiceEQ2.connect(compressor);
     compressor.connect(gainNode);
     gainNode.connect(audioCtx.destination);
   } else {
@@ -825,12 +926,12 @@ function setEnhanceEnabled(enabled) {
 }
 
 function toggleEnhance() {
-  // Init if not ready yet
+  // Init on first use only (not on first play — keeps background audio working)
   if (!audioEnhancerReady) initAudioEnhancer();
-  // Resume AudioContext if suspended (iOS Safari requires user gesture)
+  // Resume AudioContext if suspended
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   setEnhanceEnabled(!enhanceEnabled);
-  toast(enhanceEnabled ? 'Voice Enhance: ON' : 'Voice Enhance: OFF');
+  toast(enhanceEnabled ? 'Voice Enhance: ON — noise reduced, voice boosted' : 'Voice Enhance: OFF');
 }
 
 /* ---- Helpers: LocalStorage ----------------------------------------- */
@@ -1293,10 +1394,10 @@ async function playTrack(aIdx, tIdx) {
   audio.src = src;
   audio.playbackRate = getPrefs().speed || 1;
 
-  // Initialize Web Audio enhancer on first play (must happen before audio.play)
-  if (!audioEnhancerReady) initAudioEnhancer();
-  // Resume AudioContext if suspended (iOS requires user gesture)
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  // Only resume AudioContext if enhancer was previously initialized
+  if (audioEnhancerReady && audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
 
   // Resume position
   const saved = getPosition(aIdx, tIdx);
@@ -1703,6 +1804,11 @@ function bindEvents() {
   $('btn-fwd').addEventListener('click', () => seekRelative(30));
   $('np-speed').addEventListener('click', cycleSpeed);
   $('np-enhance').addEventListener('click', toggleEnhance);
+  $('np-captions').addEventListener('click', () => $('captions-modal').classList.add('open'));
+  $('captions-close').addEventListener('click', () => $('captions-modal').classList.remove('open'));
+  $('captions-modal').addEventListener('click', (e) => {
+    if (e.target === $('captions-modal')) $('captions-modal').classList.remove('open');
+  });
   $('np-close').addEventListener('click', () => history.back());
 
   // Seek
